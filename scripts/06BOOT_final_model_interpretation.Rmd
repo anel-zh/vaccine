@@ -1,0 +1,276 @@
+---
+title: '06: Final Model and Interpretation'
+author: "Anel Zhunussova and Poornima Kumar"
+date: "9 February 2026"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    df_print: paged
+    toc: true
+    theme: united
+---
+
+# Script overview
+**Purpose:** This script retrains our selected Elastic Net model on the full training set and validates it against the hold-out set. We perform a deep-dive interpretation using SHAP values, discover hierarchical interactions, and identify "Phenotype Profiles" via clustering to explain the drivers of vaccine hesitancy.
+
+---
+
+# 1. Setup and preparation
+
+```{r setup, message=FALSE, warning=FALSE}
+source("../R/load_packages.R")
+source("../R/config.R")
+source("../R/modeling_utils.R")
+source("../R/visualization_utils.R")
+
+# Load partitioned data
+model_split <- readRDS("../data/final/model_split.rds")
+train_df    <- model_split$train
+test_df     <- model_split$test
+
+# Prepare data for modeling
+final_data <- prepare_fold_data(train_df, test_df)
+counts <- table(final_data$y_train)
+wts <- ifelse(final_data$y_train == "No", sum(counts)/(2*counts["No"]), sum(counts)/(2*counts["Yes"]))
+```
+
+Quick load back of bootstrap
+```{r}
+#m2_stability <- read.xlsx("../data/final/model_comparison_BOOT10K_08selectfreqM1_95CIM2.xlsx", sheet = "M2_ALL_Boot_Predictors")
+#m1_stability <- read.xlsx("../data/final/model_comparison_BOOT10K_08selectfreqM1_95CIM2.xlsx", sheet = "M1_ALL_Boot_Predictors")
+```
+
+# 2. Retraining the Baseline Model
+We retrain the Elastic Net on the full 80% training set.
+```{r}
+set.seed(123)
+m1_results <- fit_en_helper(final_data$x_train, final_data$y_train, wts)
+
+# Evaluate on untouched hold-out set
+final_probs <- as.numeric(predict(m1_results$model, newx = final_data$x_test, s = m1_results$params$lambda, type = "response"))
+m1_metrics  <- calculate_metrics(final_data$y_test, final_probs, m1_results$model)
+
+print("--- Final Hold-out Performance (Baseline) ---")
+print(m1_metrics)
+```
+
+Bootstrapping for coefficient stability with 95% CI
+```{r}
+boot_N = 10000 # takes around 45-50 minutes
+tic()
+set.seed(123)
+m1_stability <- fit_boot_stability(
+  x = final_data$x_train, 
+  y = final_data$y_train, 
+  wts = wts, 
+  alpha = m1_results$params$alpha, # Use the alpha found in Nested CV (0.8 so far)
+  n_boot = boot_N 
+)
+toc()
+```
+
+Since the 95CI only showed 4 vars, changed to 0.80 selection frequency threshold. 
+```{r}
+stability_alpha <- 0.80 
+m1_stable_vars <- m1_stability %>%
+  filter(Selection_Freq > stability_alpha) %>%
+  pull(Variable)
+
+m1_stable_coefs <- m1_stability %>% 
+  filter(Selection_Freq > stability_alpha) %>% 
+  rename(Coefficient = Mean_Beta)
+
+message(sprintf(">>> M1 Selection: %d variables identified as robustly associated.", length(m1_stable_vars)))
+
+# Plot only the stable coefficients
+fig_m1_coefs <- plot_model_coefs(m1_stable_coefs, paste0("Baseline, Bootstrap = ", boot_N, ", Selection freq >= ", stability_alpha)) 
+fig_m1_coefs
+```
+
+
+# 3. Discovering Hierarchical Interactions
+We use the glinternet algorithm to discover hierarchical interactions among our top predictors.
+```{r}
+# Discover interactions among stable variables (using glinternet)
+x_train_filt <- final_data$x_train[, m1_stable_vars, drop = FALSE]
+inter_list <- run_hierarchical_en(x_train_filt, final_data$y_train)
+
+# Add interactions as features 
+x_train_inter <- apply_top_interactions(final_data$x_train, inter_list)
+x_test_inter  <- apply_top_interactions(final_data$x_test, inter_list)
+print(inter_list)
+```
+
+# 4. Retraining a model with hierarchical interactions 
+```{r}
+set.seed(123)
+m2_results <- fit_en_helper(x_train_inter, final_data$y_train, wts)
+m2_probs   <- as.numeric(predict(m2_results$model, newx = x_test_inter, s = m2_results$params$lambda, type = "response"))
+m2_metrics <- calculate_metrics(final_data$y_test, m2_probs, m2_results$model)
+
+print("--- Model Comparison: Baseline vs Interactions ---")
+comparison_table <- rbind(Baseline = m1_metrics, Interactions = m2_metrics)
+print(comparison_table)
+```
+
+
+Bootstrapping for coefficient stability with 95% CI
+```{r}
+tic() # around 50-55 minutes
+set.seed(123)
+m2_stability <- fit_boot_stability(
+  x = x_train_inter, 
+  y = final_data$y_train, 
+  wts = wts, 
+  alpha = m2_results$params$alpha, # Use the alpha found in Nested CV (0 Ridge so far)
+  n_boot = boot_N
+)
+toc()
+```
+
+Because M2 is Ridge (alpha = 0) by definition we cannot use selection frequency -> using only stable vars 95%CI
+```{r}
+toc()
+# Filter only the Stable Predictors (CI doesn't cross zero)
+m2_stable_vars <- m2_stability %>%
+  filter(Stable == "Yes") %>%
+  pull(Variable)
+m2_stable_coefs <- m2_stability %>%
+   filter(Stable == "Yes") %>%
+  rename(Coefficient = Mean_Beta)
+
+# m2_stable_coefs <- m2_stability %>% filter(Stable == "Yes") %>% rename(Coefficient = Mean_Beta)
+# stability_alpha <- 0.80 
+# m2_stable_vars <- m2_stability %>% 
+#   filter(Selection_Freq > stability_alpha)  %>% 
+#   pull(Variable)
+# 
+# m2_stable_coefs <- m2_stability %>% 
+#   filter(Selection_Freq > stability_alpha) %>% 
+#   rename(Coefficient = Mean_Beta)
+
+message(sprintf(">>> M2 Selection: %d variables identified as robustly associated.", length(m2_stable_vars)))
+
+# Plot only the stable coefficients
+fig_m2_coefs <- plot_model_coefs(m2_stable_coefs, paste0("Interaction, Bootstrap = ", boot_N, " 95% CI")) 
+fig_m2_coefs
+```
+Additional visualization for Bootstrapped results 
+```{r}
+# M1
+fig_m1_robust <- plot_model_coefs_boot(m1_stability, "(Baseline Model)", boot_N)
+print(fig_m1_robust)
+
+# M2
+fig_m2_robust <- plot_model_coefs_boot(m2_stability, "(Interaction Model)")
+print(fig_m2_robust)
+```
+
+# Saving results 
+```{r}
+ggsave(file.path("../figures/", paste0("Main_M1_BOOT10K_08selectfreqM1_95CIM2.pdf")),fig_m1_coefs, width = 16, height = 15)
+ggsave(file.path("../figures/", paste0("Main_M2_BOOT10K_08selectfreqM1_95CIM2.pdf")), fig_m2_coefs, width = 16, height = 15)
+ggsave(file.path("../figures/", paste0("Main_M1_BOOT10K_08selectfreqM1_95CIM2_ROBUST.pdf")),fig_m1_robust, width = 16, height = 15)
+ggsave(file.path("../figures/", paste0("Main_M2_BOOT10K_08selectfreqM1_95CIM2_ROBUST.pdf")), fig_m2_robust, width = 16, height = 15)
+
+m_compare_table <- list(
+  "Model_Comparison"   = comparison_table,
+  "Hierarchical_Interactions_All" = inter_list, 
+  "M1_Stable_Predictors"  = m1_stable_coefs,
+  "M2_Stable_Predictors"  = m2_stable_coefs,
+  "M1_ALL_Boot_Predictors"  = m1_stability,
+  "M2_ALL_Boot_Predictors"  = m2_stability,
+  "M1_All_Predictors" = get_top_predictors(m1_results$model, m1_results$params, 0),
+  "M2_All_Predictors" = get_top_predictors(m2_results$model, m2_results$params, 0),
+  
+  "M1_Params" = data.frame(m1_results$params),
+  "M2_Params" = data.frame(m2_results$params)
+)
+# Save everything into one multi-sheet Excel file
+openxlsx::write.xlsx(m_compare_table,
+                     file = "../data/final/model_comparison_BOOT10K_08selectfreqM1_95CIM2.xlsx")
+
+```
+
+
+# Post-hoc analysis 
+```{r}
+cluster_table <- list()
+target_models <- c("m1", "m2")
+for (target in target_models) {
+  # Setup
+  current_results <- get(paste0(target, "_results"))
+  current_coefs   <- get(paste0(target, "_stable_coefs"))
+  current_vars    <- get(paste0(target, "_stable_vars"))
+  current_x_train <- if(target == "m2") x_train_inter else final_data$x_train
+  current_x_test  <- if(target == "m2") x_test_inter else final_data$x_test
+  
+  # Interactions
+  inter_pages <- list() 
+  if (target == "m2" && any(grepl("int", current_coefs$Variable))){
+    message(">>> Generating interaction plots for M2...")
+  inter_plots <- plot_en_interactions(current_coefs, train_df, "take_vaccination", wts)
+  inter_pages <- split(inter_plots, ceiling(seq_along(inter_plots) / 4)) %>%
+    map(~wrap_plots(.x, ncol = 2, nrow = 2) + plot_annotation(title = "Interactions Analysis"))
+  } 
+  # Correlations
+  p_cor_model <- plot_category_cor(data.frame(current_x_train), current_vars, 
+                                   paste0(toupper(target), " Top Predictors"))
+  
+  # SHAP 
+  shp_obj <- calculate_shaps(current_results, current_x_test)
+  p_shap_summary <- plot_shap_summary(shp_obj, current_vars)
+  
+  shap_pdp_list <- map(current_vars, ~{
+    shapviz::sv_dependence(shp_obj, v = .x, alpha = 0.5) + 
+      fig_theme() + labs(title = make_pretty(.x))
+  })
+  shap_pages <- split(shap_pdp_list, ceiling(seq_along(shap_pdp_list) / 4)) %>%
+    map(~wrap_plots(.x, ncol = 2, nrow = 2) + plot_annotation(title = "SHAP Dependency Profiles"))
+  
+  # Clustering
+   vars_for_clustering <- current_vars
+  if (target == "m2") {
+    vars_for_clustering <- vars_for_clustering[!grepl("^int_", vars_for_clustering)]
+  }
+  
+  clusters <- run_phenotype_clustering(current_x_train, final_data$y_train, vars_for_clustering, k = 3)
+  p_clus_val  <- wrap_plots(clusters$validation_plots, ncol = 1) + plot_annotation(title = "Clustering Validation")
+  p_clus_sig  <- plot_phenotype_profiles(clusters)
+  p_clus_tsne <- plot_cluster_validation(clusters, paste0("(", toupper(target), ")"))
+  cluster_summary <- clusters$data %>%
+    group_by(Phenotype) %>%
+    summarise(
+      N_Total = n(),
+      N_Hesitant = sum(Outcome == "No"),
+      N_Intenders = sum(Outcome == "Yes"),
+      Percent_Hesitant = round((N_Hesitant / N_Total) * 100, 1),
+      Stability_Score = round(clusters$stability[first(as.numeric(Phenotype))], 3)
+    )
+  print(cluster_summary)
+  cluster_table[[paste0(toupper(target), "_Clusters")]] <- cluster_summary
+  
+  # Combine 
+  
+  report_plots <- list(
+    if (target == "m2") inter_pages else NULL, 
+    list(p_cor_model, p_shap_summary),
+    shap_pages,
+    list(p_clus_val, p_clus_sig, p_clus_tsne)
+  ) %>% purrr::flatten() %>%
+    purrr::compact()
+  
+  # Save
+  report_path <- file.path("../figures/", paste0("Interpretation_Report_", target, "_BOOT10K_08selectfreqM1_95CIM2.pdf"))
+  save_report_pdf(report_plots, report_path, width = 16, height = 15)
+  message(">>> FINISHED: ", report_path)
+}
+
+# Saving cluster table 
+openxlsx::write.xlsx(cluster_table,
+                     file = "../data/final/cluster_comparison_BOOT10K_08selectfreqM1_95CIM2.xlsx")
+
+```
+
+

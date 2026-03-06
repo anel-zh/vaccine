@@ -1,0 +1,104 @@
+---
+title: "05: Nested Cross Validation"
+author: "Anel Zhunussova and Poornima Kumar"
+date: "9 February 2026"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+---
+**Purpose:**
+This script executes the model selection process. We utilize 5-fold Nested Cross-Validation (Nested CV) on training set (80% of the original dataset) to compare the performance and stability of Elastic Net (EN), Random Forest (RF), and Logistic Regression (LOG). This approach ensures that hyperparameters are tuned independently of performance evaluation, providing an unbiased assessment to identify the optimal algorithm for final interpretation.
+
+**Requirements:**
+- `model_split.rds`: Created in Script 04.
+
+**Outline:**
+1. **Setup and preparation:** Loading partitioned data.
+2. **Nested Cross-Validation:** The outer loop for performance estimation and inner loop for tuning.
+3. **Models Comparison & Stability:** Visualizing the outer folds performance.
+
+---
+# 1. Setup
+```{r setup, message=FALSE, warning=FALSE}
+source("../R/load_packages.R")
+source("../R/config.R")
+source("../R/modeling_utils.R")
+source("../R/visualization_utils.R")
+
+# Load partitioned data 
+model_split <- readRDS("../data/final/model_split.rds")
+train_df    <- model_split$train # 775 obs 59 var
+```
+
+# 2. Nested Cross-Validation
+We use Nested CV (5-fold outer) to estimate the true performance of our candidate algorithms: 
+- Parameter tuning (inner loop) 
+- Performance evaluation (outer loop).
+```{r}
+set.seed(123)
+outer_folds  <- createFolds(train_df$take_vaccination, k = 5)
+results_list <- list()
+
+tictoc::tic() #takes around 13 minutes
+for (i in 1:length(outer_folds)) {
+  message(sprintf(">>> Processing Outer Fold %d...", i))
+  
+  # 1 Partition outer loop
+  fold_data <- prepare_fold_data(train_df[-outer_folds[[i]], ], train_df[outer_folds[[i]], ])
+  
+  # 2 Handle class imbalance (Weights)
+  counts <- table(fold_data$y_train)
+  wts <- ifelse(fold_data$y_train == "No", sum(counts)/(2*counts["No"]), sum(counts)/(2*counts["Yes"]))
+  
+  # 3 Train algorithms (Inner-loop tuning)
+  fold_seed <- 123 + i 
+  set.seed(fold_seed)
+  en_res  <- fit_en_helper(fold_data$x_train, fold_data$y_train, wts)
+  set.seed(fold_seed)
+  rf_res  <- fit_rf_helper(fold_data$x_train, fold_data$y_train) # No weights needed for RF 'downsampling'
+  set.seed(fold_seed)
+  log_res <- fit_log_helper(fold_data$x_train, fold_data$y_train, wts)
+
+  # 4 Evaluate on Outer-fold test set
+  prob_en  <- as.numeric(predict(en_res$model, newx = fold_data$x_test, s = en_res$params$lambda, type = "response"))
+  prob_rf  <- predict(rf_res, newdata = fold_data$x_test, type = "prob")[,"No"]
+  prob_log <- predict(log_res, newdata = as.data.frame(fold_data$x_test), type = "response")
+  
+  # 5 Extract standardized metrics
+  results_list[[i]] <- bind_rows(
+    calculate_metrics(fold_data$y_test, prob_en, en_res$model)  %>% mutate(Model = "EN", Fold = i),
+    calculate_metrics(fold_data$y_test, prob_rf)  %>% mutate(Model = "RF", Fold = i),
+    calculate_metrics(fold_data$y_test, prob_log, log_res) %>% mutate(Model = "LOG", Fold = i)
+  )
+}
+tictoc::toc()
+```
+
+```{r}
+# Aggregate results
+cv_summary <- bind_rows(results_list)
+# Creating the final comparison table
+final_comparison <- cv_summary %>% 
+  group_by(Model) %>% 
+  summarise(across(
+    c(AUC, R2_McFadden, R2_Tjur, F1_Hesitancy, F1_Intention, Accuracy), 
+    list(mean = mean, sd = sd),
+    .names = "{.col}_{.fn}"
+  ))
+
+print(final_comparison)
+```
+
+# 3. Model Comparison & Stability
+```{r fig.width=12, fig.height=8}
+fig_stability <- plot_cv_stability(cv_summary)
+fig_stability
+```
+Saving results 
+```{r}
+# write.csv(final_comparison, "../data/final/nested_cv_performance_summary.csv", row.names = FALSE)
+# saveRDS(cv_summary, "../data/final/nested_cv_fold_details.rds")
+# save_report_pdf(list(fig_stability), "../figures/QC_Nested_CV.pdf", width = 12, height = 8)
+```
+

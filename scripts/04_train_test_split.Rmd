@@ -1,0 +1,106 @@
+---
+title: "04: Feature engineering and Data Splitting"
+author: "Anel Zhunussova and Poornima Kumar"
+date: "9 February 2026"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    theme: united
+---
+
+# Script overview
+
+**Purpose:**
+This script prepares the dataset for machine learning modeling. We perform final feature cleaning (applying correct data types and removing metadata) and execute a stratified train/test split (80/20). Stratification ensures that both the training and hold-out sets are representative of the original population's vaccine intent, sex, and age distribution.
+
+**Requirements:**
+- `cohort_data.csv`: Created in Script 02.
+
+**Outline:**
+1. **Setup and preparation:** Loading utilities and cohort data.
+2. **Data splitting:** Creating the stratified partition index.
+3. **Split Quality Control:** Visualizing the balance between training and testing sets.
+4. **Cleaning and Formatting:** Feature cleaning.
+4. **Data Export:** Saving the final partitioned data as an RDS object.
+
+---
+
+# 1. Setup and preparation
+```{r setup, message=FALSE, warning=FALSE}
+source("../R/load_packages.R")
+source("../R/config.R")
+source("../R/modeling_utils.R")    
+source("../R/visualization_utils.R")
+
+cohort_data <- read.csv("../data/processed/cohort_data.csv")
+
+# Just for safety:
+# Sort by record_id to ensure that "Row 1" is always the same human being.
+# This ensures that set.seed(123) produces the exact same split every time.
+cohort_data <- cohort_data %>% arrange(record_id)
+```
+
+# 2. Data Splitting
+We perform a stratified 80/20 split. To prevent bias and ensure the test set is representative, we stratify by Vaccination Intent, Sex, and Age (binned into quartiles).
+```{r}
+set.seed(123) 
+
+# Create strata based on Outcome + Sex + Binned Age
+age_bins <- cut(cohort_data$age, breaks = 4, labels = FALSE)
+strata_vector <- paste(cohort_data$take_vaccination, cohort_data$sex, age_bins, sep = "_")
+
+# Generate 80/20 split index
+train_index <- createDataPartition(strata_vector, p = 0.80, list = FALSE)
+```
+
+# 3. Split Quality Control
+Visualizing if the Training and Testing sets are balanced.
+```{r}
+# Prepare dataframe for QC plotting
+plot_df <- cohort_data %>%
+  mutate(split = if_else(row_number() %in% train_index, "Train", "Test"),
+         split = factor(split, levels = c("Train", "Test")))
+
+p_age_qc  <- plot_split_compare(plot_df, "age", type = "continuous")
+p_sex_qc  <- plot_split_compare(plot_df, "sex", type = "categorical")
+p_out_qc  <- plot_split_compare(plot_df, "take_vaccination", type = "categorical")
+
+fig_split_qc <- (p_age_qc + p_sex_qc + p_out_qc) +
+  plot_layout(guides = "collect") &
+  plot_annotation(title = "Stratified Split QC: Train vs Test Balance") &
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+fig_split_qc
+
+#save_report_pdf(list(fig_split_qc), "../figures/QC_Data_Split.pdf", width = 12, height = 6)
+```
+# 4. Cleaning & Formating 
+```{r}
+# We convert variables to their correct types (Factors/Numeric) and remove metadata, dates to ensure the model only learns from raw predictors.
+processed_df <- prepare_model_data_base(
+  df = cohort_data, 
+  target_var = "take_vaccination", 
+  nominal_list = nominal_vars
+)
+```
+
+# 5. Scenario Creation and Export
+We save the data as a single list object named model_split. This object contains the distinct Training and Testing sets, ensuring consistency across all subsequent modeling scripts.
+```{r}
+# Construct the split object
+model_split <- list(
+  train = processed_df[train_index, ],
+  test  = processed_df[-train_index, ]
+)
+
+# Save to the processed data directory
+#saveRDS(model_split, "../data/final/model_split.rds")
+
+# Final confirmation for report
+message(">>> Data successfully split.")
+message(">>> Training N: ", nrow(model_split$train))
+message(">>> Testing N: ",  nrow(model_split$test))
+```
+
+

@@ -1,0 +1,221 @@
+---
+title: "02: Cohort Selection and LOCF Imputation"
+author: "Anel Zhunussova and Poornima Kumar"
+date: "9 February 2026"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    theme: united
+    number_sections: false
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Script overview
+
+**Purpose:**
+
+This script serves as the cohort selection and data filtering phase. It transforms the longitudinal "master_database" (created in script 01) into a final cross-sectional dataset ready for modeling. Mainly, the script works on selecting scales based on the earliest available vaccination intent response for each participant. To maximize data retention, it utilizes a Last Observation Carried Forward (LOCF) approach, pairing the vaccination intent outcome with the most recent available predictor data (either concurrent or prior) to ensure valid responses are not discarded due to missing concurrent scales.
+
+**Requirements:**
+This script requires the following file in the `data/processed/` directory:
+- `master_database.csv`: Generated in Script 01.
+
+**Outline:**
+1. **Setup and preparation:** Loading centralized packages, global configurations, and the master database.
+2. **Data selection:** Reshaping to long format, applying 6-week LOCF imputation, and selecting the index time-point (earliest response).
+3. **Final cleanup:** Formatting variables, filtering by recruitment density (Months with N >= 30), and removing incomplete cases.
+4. **Supplementary QC:** Validating the timeline distribution, temporal bias in intent, and LOCF imputation burden/lag.
+
+**Output:** 
+- `cohort_data.csv`: Saved in `data/processed/`.
+- Figures for supplementary results.
+
+---
+
+# 1. Setup and preparation
+
+Loading project utilities and the master database.
+```{r setup, message=FALSE, warning=FALSE}
+# setwd("../scripts") # Adjust path if running manually
+
+source("../R/load_packages.R")
+source("../R/config.R")
+source("../R/processing_utils.R") 
+source("../R/visualization_utils.R")
+
+# Loading the master database from the processed data folder
+master_data <- read.csv("../data/processed/master_database.csv")
+```
+
+# 2. Data selection
+## 2.1 Reshaping to long format
+Pivoting time-varying columns to rows while keeping static demographic variables constant. We use the target timepoints and static variables defined in config.R.
+
+```{r}
+long_data <- master_data %>% 
+  pivot_longer(
+    cols = -all_of(static_vars), 
+    names_to = c(".value", "timepoint"), 
+    names_pattern = "(.*)_(.*)$")  %>%
+  
+  # Factoring timepoints using levels from config
+  mutate(timepoint = factor(timepoint, levels = target_timepoints, ordered = TRUE)) %>%
+  arrange(record_id, timepoint)
+```
+
+
+## 2.2 Imputation (LOCF)
+Filling missing predictor values using the Last Observation Carried Forward method. We implement a 6-week look-back window (checking concurrent, then up to 3 prior bi-weekly steps).
+
+```{r}
+# Defining time-varying predictor columns for imputation
+predictor_cols <- setdiff(names(long_data), c(static_vars, "timepoint", "take_vaccination", "date_complete"))
+
+long_filled <- long_data %>%
+  mutate(date_complete = lubridate::as_date(date_complete)) %>% 
+  group_by(record_id) %>%
+  arrange(timepoint, .by_group = TRUE) %>%
+  
+  # Recovering missing dates within the 6-week window
+  mutate( 
+    date_was_recovered = is.na(date_complete),
+    date_complete = case_when(
+      !is.na(date_complete)        ~ date_complete,
+      !is.na(lag(date_complete, 1)) ~ lag(date_complete, 1) + 14,
+      !is.na(lag(date_complete, 2)) ~ lag(date_complete, 2) + 28,
+      !is.na(lag(date_complete, 3)) ~ lag(date_complete, 3) + 42,
+      TRUE                          ~ as.Date(NA) 
+    ),
+  
+  # Implementing 6-week look-back for predictors
+  across(all_of(predictor_cols), 
+                ~ case_when(
+                  !is.na(.)        ~ .,         
+                  !is.na(lag(., 1)) ~ lag(., 1), 
+                  !is.na(lag(., 2)) ~ lag(., 2), 
+                  !is.na(lag(., 3)) ~ lag(., 3), 
+                  TRUE              ~ NA_real_  
+                ))) %>%
+  ungroup() 
+
+# Selecting the earliest available vaccine response per participant
+selected_data <- long_filled %>%
+  filter(!is.na(take_vaccination)) %>%
+  group_by(record_id) %>%
+  slice_min(order_by = timepoint, n = 1, with_ties = FALSE) %>%
+  ungroup()
+```
+
+# 3. Final cleanup
+## 3.1 Cleaning 
+Ensuring scale variables are numeric and removing incomplete cases. We also filter for high-density months to reduce temporal bias.
+```{r}
+# Initial cleanup and date formatting
+cohort_data <- selected_data %>%
+  mutate(across(-c(record_id, timepoint, date_complete, sex, area_type), as.numeric)) %>%
+  drop_na() %>%
+  mutate(month = floor_date(as_date(date_complete), "month"))
+
+# Identifying months with at least 30 participants
+months_to_keep <- cohort_data %>%
+  group_by(month) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n >= 30) %>%
+  pull(month)
+
+# Final filtering and applying labels from config
+cohort_data_final <- cohort_data %>%
+  filter(month %in% months_to_keep) %>%
+  mutate(take_vaccination_lbl = apply_factor(take_vaccination, "take_vaccination"))
+
+cat(sprintf("Final Model Data N: %d\nFiltered months: %d\n", 
+            nrow(cohort_data_final), length(months_to_keep)))
+```
+
+## 3.2 Saving the finalized cohort data
+```{r}
+#write.csv(cohort_data_final, "../data/processed/cohort_data.csv", row.names = FALSE) # 962 obs 65 vars (includes intermittent QC vars)
+```
+
+```{r}
+# Summary statistics (more in 03 scripts)
+cat("======================================================\n")
+cat(" FINAL MODEL DATA \n")
+cat("======================================================\n")
+cat(sprintf("Total Participants (N): %d\n", nrow(cohort_data_final)))
+cat(sprintf("Data Collection Period: %s to %s\n", min(cohort_data_final$date_complete, na.rm = TRUE), max(cohort_data_final$date_complete, na.rm = TRUE)))
+cat("------------------------------------------------------\n")
+cat("Timepoint Distribution:\n")
+print(table(cohort_data_final$timepoint))
+cat("======================================================\n")
+```
+
+# 4. Supplementary: Quality control
+## 4.1 Vaccine response exploration
+Visualizing the data collection timeline and the temporal distribution of intent.
+```{r}
+p_timeline <- plot_timeline(cohort_data_final)
+p_bias     <- plot_outcome_temporal_bias(cohort_data_final)
+
+p_timeline
+p_bias
+```
+
+## 4.2 LOCF validation
+Calculating the temporal lag for each imputed observation to validate the 6-week window.
+```{r}
+# Calculating the lag per scale for each participant
+time_ranks <- data.frame(timepoint = target_timepoints, rank_id = seq_along(target_timepoints))
+
+targets <- cohort_data_final %>%
+  select(record_id, target_timepoint = timepoint) %>%
+  left_join(time_ranks, by = c("target_timepoint" = "timepoint")) %>%
+  rename(target_rank = rank_id)
+
+sources <- long_data %>%
+  filter(record_id %in% cohort_data_final$record_id) %>%
+  select(record_id, timepoint, all_of(predictor_cols)) %>%
+  pivot_longer(cols = all_of(predictor_cols), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  left_join(time_ranks, by = "timepoint") %>%
+  rename(source_rank = rank_id)
+
+lag_table <- sources %>%
+  inner_join(targets, by = "record_id") %>%
+  filter(source_rank <= target_rank) %>%
+  group_by(record_id, variable) %>%
+  summarise(lag_steps = first(target_rank) - max(source_rank), .groups = "drop")
+
+```
+
+Getting LOCF summary 
+```{r}
+LOCF_summary <- prep_imputation_summaries(lag_table) 
+```
+
+Plotting imputation results
+```{r fig.width=9.5, fig.height=9}
+p_incidence <- plot_imputation_incidence(LOCF_summary$incidence_plot_data)
+p_burden    <- plot_imputation_burden(LOCF_summary$imputed_only_plot_data)
+p_lag       <- plot_lag_by_scale(LOCF_summary$locf_plot_data, LOCF_summary$sort_order)
+
+p_incidence
+p_burden
+p_lag
+```
+
+# 5 Saving figures 
+```{r}
+# Creating a list of all QC figures for Script 02
+s02_qc_plots <- list(
+  (p_timeline + p_bias) / (p_incidence + p_burden),
+  p_lag
+)
+
+# Saving as PDF 
+#save_report_pdf(s02_qc_plots, "../figures/QC_Cohort_Selection_LOCF.pdf",  width = 13, height = 12)
+```
+

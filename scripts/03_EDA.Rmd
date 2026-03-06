@@ -1,0 +1,179 @@
+---
+title: "03: Exploratory Data Analysis"
+author: "Anel Zhunussova and Poornima Kumar"
+date: "9 February 2026"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    theme: united
+    number_sections: false
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Script overview
+
+**Purpose:**
+This script serves as QC and data exploration for the cohort data. We visualize the distributions of sociodemographic and psychological predictors, calculate group differences via Cohen's D, and assess multicollinearity through correlation analysis.
+
+**Requirements:**
+- `cohort_data.csv`: Created in Script 02.
+
+**Outline:**
+1. **Setup and preparation:** Loading utilities and factoring data.
+2. **Sociodemographic factors:** Distributions.
+3. **Pandemic context:** Distributions.
+3. **Psychological profiles:** Raincloud plots (with Bayesian t-tests) and ridge plots.
+4. **Overall analysis:** Correlation matrices and Cohen’s D effect sizes.
+
+---
+
+# 1. Setup and preparation
+
+Loading project utilities and the cohort dataset.
+```{r setup, message=FALSE, warning=FALSE}
+# setwd("../scripts")
+
+source("../R/load_packages.R")
+source("../R/config.R")
+source("../R/processing_utils.R")
+source("../R/visualization_utils.R")
+
+# Load data and apply factor mapping from config
+cohort_data <- read.csv("../data/processed/cohort_data.csv") %>%
+  mutate(
+    # Convert the pre-existing label to a factor to ensure plot order
+    take_vaccination_lbl = factor(take_vaccination_lbl, 
+                                  levels = c("Intention (Yes)", "Hesitancy (No)")),
+    
+    # Automatically factorize everything else that has a key in levels_map
+    across(any_of(names(levels_map)), ~ apply_factor(.x, cur_column()))
+  )
+```
+
+# 2. Sociodemographic predictors
+Visualizing the distribution of demographic parameters across vaccination intent.
+```{r fig.width=15, fig.height=9}
+p_demo_total <- plot_var_grid(cohort_data, demo_vars, ncol = 5, title = "Demographics")
+p_demo_total
+```
+
+# 3. Pandemic context predictors
+Visualizing variables related to pandemic exposure, distancing, and health impact.
+```{r fig.width=22, fig.height=11}
+p_context_total <- plot_var_grid(cohort_data, context_vars, ncol = 6, title = "Pandemic Context") 
+p_context_total
+```
+
+# 4. Psychological predictors
+## 4.1 Raincloud
+Comparing psychological scales between intenders and refusers using raincloud plots.
+```{r fig.width=15, fig.height=5}
+# Defining the recipe for all psychological scales
+plot_psych_recipe <- list(
+  promis = list(prefix = "promis_", title = "PROMIS",
+    vars = colnames(cohort_data %>% select(starts_with("promis_")))),
+  apathy = list(prefix = "apathy_", title = "APATHY",
+    vars = colnames(cohort_data %>% select(starts_with("apathy_")))),
+  coping1 = list(prefix = "coping_", title = "COPING (A)",
+    vars = c("coping_accept", "coping_beh_diseng", "coping_denial", "coping_emo_support", 
+             "coping_religion", "coping_active","coping_humor")),
+  coping2 = list(prefix = "coping_", title = "COPING (B)",
+    vars = c("coping_inst_support", "coping_plan", "coping_pos_fram", "coping_self_blame", 
+             "coping_self_dist", "coping_substance", "coping_venting")),
+  other = list(prefix = "", title = "Other bi-weekly",
+    vars = c("loneliness", "anhedonia")),
+  bis = list(prefix = "bis_", title = "BIS",
+    vars = colnames(cohort_data %>% select(starts_with("bis_")))),
+  mpss = list(prefix = "mpss_", title = "MPSS",
+    vars = colnames(cohort_data %>% select(starts_with("mpss_")))),
+  brs = list(prefix = "", title = "BRS", vars = "brs"),
+  pss = list(prefix = "", title = "PSS", vars = "pss"),
+  other_monthly = list(prefix = "", title = "Other (monthly)",
+    vars = c("sias", "worry"))
+)
+
+# Generating plots with Bayesian t-tests
+current_test <- "bayesian" 
+
+all_psych_figs <- map(plot_psych_recipe, ~{
+  plot_rainclouds(
+    data = cohort_data,
+    group_var = "take_vaccination_lbl",
+    metric_vars = .x$vars,
+    prefix_to_remove = .x$prefix,
+    title = .x$title,
+    test_type = current_test 
+  )})
+```
+
+## 4.2 Ridge plots
+```{r}
+p_ridge_biweekly <- (
+  make_ridge_plot(cohort_data, plot_psych_recipe$promis$vars, "PROMIS") | 
+  make_ridge_plot(cohort_data, plot_psych_recipe$apathy$vars, "APATHY")
+) / make_ridge_plot(cohort_data, plot_psych_recipe$coping1$vars, "COPING") +
+  plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+p_ridge_monthly <- (
+  make_ridge_plot(cohort_data, plot_psych_recipe$bis$vars, "BIS") |
+  make_ridge_plot(cohort_data, plot_psych_recipe$mpss$vars, "MPSS")
+) / (
+  make_ridge_plot(cohort_data, c("sias", "worry"), "Other") |
+  make_ridge_plot(cohort_data, c("pss", "brs"), "Stress & Resilience")
+) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+# 5. Overall analysis
+## 5.1 Correlation
+Assessing Spearman correlations to identify multicollinearity within predictor blocks and for all.
+```{r fig.width=10, fig.height=10}
+# Correlation for all variables
+all_vars <- c(demo_vars, context_vars, psych_vars)
+p_cor_all <- plot_category_cor(cohort_data, all_vars, "Correlation Matrix: All Predictors & Outcome")
+
+# Correlations by category
+p_cor_demo <- plot_category_cor(cohort_data, demo_vars, "Sociodemographic & Outcome")
+p_cor_ctx  <- plot_category_cor(cohort_data, context_vars, "Pandemic Context & Outcome")
+p_cor_psyc <- plot_category_cor(cohort_data, psych_vars, "Psychological Scales & Outcome")
+```
+
+## 5.2 Dendogram
+Dendogram to check for redundant predictors
+```{r fig.width=12, fig.height=14}
+p_dendro <- plot_dendrogram(cohort_data, all_vars)
+p_dendro
+```
+
+## 5.3 Cohen's D
+Calculating the standardized effect size for each predictor.
+```{r fig.width=12, fig.height=14}
+p_cohen <- plot_cohens_d_summary(cohort_data, all_vars, "take_vaccination_lbl")
+p_cohen
+```
+
+# 6 Saving figures
+```{r}
+s03_report_plots <- list(
+  p_demo_total, 
+  p_context_total,
+
+  all_psych_figs$promis / (all_psych_figs$apathy + all_psych_figs$other),
+  all_psych_figs$coping1 / all_psych_figs$coping2 / all_psych_figs$bis,
+  (all_psych_figs$mpss + all_psych_figs$brs) / (all_psych_figs$pss + all_psych_figs$other_monthly),
+  
+  p_ridge_biweekly,
+  p_ridge_monthly,
+  
+  p_cor_all,
+  p_cor_psyc,
+  p_cor_demo + p_cor_ctx,
+  p_dendro,
+  
+  p_cohen
+)
+#save_report_pdf(s03_report_plots, "../figures/QC_EDA.pdf", width = 20, height = 12)
+```
+

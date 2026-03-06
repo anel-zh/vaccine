@@ -1,0 +1,158 @@
+# ==============================================================================
+# PROJECT: Vaccination Prediction
+# FILE: config.R
+# ROLE: Centralized configuration, variable metadata, and factor mappings
+# AUTHOR: Anel Zhunussova and Poornima Kumar 
+# DATE CREATED: 09 February 2026 
+# LAST UPDATED: 09 February 2026 by AZ
+# ==============================================================================
+
+# 1. TIMEPOINTS & STATIC VARIABLES ---------------------------------------------
+
+# Standard naming for time-varying data
+target_timepoints <- c("month0", "2week", "month1", "6week", "month2", "10week", "month3")
+
+# Mapping for pretty printing in plots (month0 -> Baseline)
+pretty_timepoints <- c(
+  "month0" = "Baseline",
+  "2week"  = "2 Weeks",
+  "month1" = "Month 1",
+  "6week"  = "6 Weeks",
+  "month2" = "Month 2",
+  "10week" = "10 Weeks",
+  "month3" = "Month 3"
+)
+
+# Variables collected only once (Demographics, state color, etc.)
+static_vars <- c(
+  "record_id", "sex", "age", "education", "area_type", 
+  "psych_history", "essential_worker_at_home", "health_insurance", 
+  "state_color", "physio", "neurological", "sias"
+)
+
+# 2. VARIABLE LABELS (For Plotting) --------------------------------------------
+var_labels <- c(
+  # Outcome Variable  
+  "take_vaccination"               = "Vaccination Status",
+  "take_vaccination_lbl"           = "Vaccination Status",
+  "Intention (Yes)"                = "Intention",
+  "Hesitancy (No)"                 = "Hesitancy",
+  
+  # Socio-Demographics
+  "age"                            = "Age (Years)",
+  "sex"                            = "Sex",
+  "sex.1"                          = "Sex: Female",
+  "education"                      = "Education Level",
+  "area_type"                      = "Rurality Index (City -> Rural)",
+  "state_color"                    = "State Politics",
+  "state_color.2"                  = "State Politics: Red State",
+  "essential_worker_at_home"       = "Essential Worker in Household",
+  "essential_worker_at_home.1"     = "Essential Worker in Household: Yes",
+  "health_insurance"               = "Health Insurance Status",
+  "health_insurance.1"             = "Health Insurance: Insured", 
+  "psych_history"                  = "Psychiatric History",
+  "psych_history.1"                = "Psychiatric History: Yes",
+  "physio"                         = "Physiological Symptoms (Count)",
+  "neurological"                   = "Neurological Symptoms (Count)",
+  
+  # Pandemic Context  
+  "reading_about"                  = "Frequency of Reading COVID-19 News",
+  "time_outside_home"              = "Time Spent Outside Home",
+  "trouble_staying_away"           = "Difficulty of Social Distancing",
+  "stress_stay_home"               = "Stress of Staying Home",
+  "mental_health"                  = "COVID-19 Impact: Mental Health",
+  "physical_health"                = "COVID-19 Impact: Physical Health",
+  "fear_of_infection"              = "Fear of Infection (Self+Family)",
+  "pandemic_stress_index_negative" = "Pandemic Stress Index: Negative",
+  "pandemic_stress_index_positive" = "Pandemic Stress Index: Positive",
+  "covid_diagnosed_self.1"         = "COVID-19 Diagnosed Self: No",
+  "covid_diagnosed_family.1"       = "COVID-19 Diagnosed Family: No",
+  "covid_diagnosed_self"           = "COVID-19 Diagnosed: Self",
+  "covid_diagnosed_family"         = "COVID-19 Diagnosed: Family",
+  
+  # Psychological Scales
+  "promis_anxiety"                 = "PROMIS: Anxiety",
+  "promis_depression"              = "PROMIS: Depression",
+  "promis_fatigue"                 = "PROMIS: Fatigue",
+  "promis_sleep"                   = "PROMIS: Sleep Disturbance",
+  "promis_participation"           = "PROMIS: Social Participation",
+  "apathy_behavioral"              = "Apathy: Behavioral",
+  "apathy_emotional"               = "Apathy: Emotional",
+  "apathy_social"                  = "Apathy: Social",
+  "bis_attention"                  = "BIS: Attention",
+  "bis_motor"                      = "BIS: Motor",
+  "bis_selfcontrol"                = "BIS: Self-Control",
+  "mpss_family"                    = "MPSS: Family",
+  "mpss_friends"                   = "MPSS: Friends",
+  "mpss_so"                        = "MPSS: Sig. Other",
+  "loneliness"                     = "UCLA: Loneliness",
+  "anhedonia"                      = "SHPS: Anhedonia",
+  "sias"                           = "SIAS: Social Anxiety",
+  "worry"                          = "PSWQ: Worry",
+  "brs"                            = "BRS: Resilience",
+  "pss"                            = "PSS: Perceived Stress"
+)
+
+# 3. FACTOR LEVEL DEFINITIONS --------------------------------------------------
+# These define the character labels for numeric levels used in the dataset.
+
+levels_map <- list(
+  take_vaccination         = c("0" = "Intention (Yes)", "1" = "Hesitancy (No)"),
+  sex                      = c("0" = "Male", "1" = "Female"),
+  essential_worker_at_home = c("0" = "No", "1" = "Yes"),
+  health_insurance         = c("0" = "Uninsured", "1" = "Insured"),
+  psych_history            = c("0" = "No", "1" = "Yes"),
+  education                = c("0" = "HS or less", "1" = "College (2yr)", "2" = "College (4yr)", "3" = "Post-College", "4" = "> Graduate"),
+  area_type                = c("0" = "Large city", "1" = "Suburban", "2" = "Small city", "3" = "Town/Village", "4" = "Rural"),
+  state_color              = c("1" = "Blue State", "2" = "Red State"),
+  reading_about            = c("0" = "Never", "1" = "Rarely", "2" = "Occasionally", "3" = "Often", "4" = "Most of time"),
+  time_outside_home        = c("0" = "Not at all", "1" = "1-2 days/wk", "2" = "Few days/wk", "3" = "Several days/wk", "4" = "Every day"),
+  trouble_staying_away     = c("0" = "None", "1" = "A little", "2" = "Moderate", "3" = "A lot", "4" = "Great amount"),
+  stress_stay_home         = c("0" = "Not at all", "1" = "Slightly", "2" = "Moderately", "3" = "Very"),
+  mental_health            = c("0"="Not at all", "1"="Slightly", "2"="Moderately", "3"="Very", "4"="Extremely"),
+  physical_health          = c("0"="Not at all", "1"="Slightly", "2"="Moderately", "3"="Very", "4"="Extremely"),
+  covid_diagnosed_self     = c("0" = "Yes", "1" = "No"),
+  covid_diagnosed_family   = c("0" = "Yes", "1" = "No")
+)
+# 4. VARIABLE CATEGORY LISTS ---------------------------------------------------
+# Variable categories 
+demo_vars <- c("age", "sex", "education", "area_type", "state_color", 
+               "essential_worker_at_home", "health_insurance", "psych_history", 
+               "physio", "neurological")
+
+context_vars <- c("physical_health", "mental_health", "reading_about", 
+                  "time_outside_home", "trouble_staying_away", "stress_stay_home", 
+                  "pandemic_stress_index_positive", "pandemic_stress_index_negative", 
+                  "fear_of_infection", "covid_diagnosed_family", "covid_diagnosed_self")
+
+psych_vars <- names(var_labels)[grepl("promis_|apathy_|bis_|coping_|mpss_|loneliness|anhedonia|sias|worry|brs|pss", names(var_labels))]
+
+# Additional groupings of variabls 
+# That are factored in modeling 
+nominal_vars <- c("sex", "state_color", "essential_worker_at_home", 
+                  "health_insurance", "psych_history", "covid_diagnosed_self", "covid_diagnosed_family")
+
+# That are collected at baseline only 
+static_vars <- c("record_id", "sex", "age", "education", 
+                 "area_type", "psych_history", "essential_worker_at_home", 
+                 "health_insurance", "state_color", "physio", "neurological",
+                 #"drug_abuse_month0", "audit_month0", 
+                 "sias")
+
+# 5. HELPERS -------------------------------------------------------------------
+
+# Helper: make_pretty
+make_pretty <- function(vec) {
+  dplyr::recode(vec, !!!var_labels, .default = vec)
+}
+
+# Helper: apply_factor
+# Uses the levels_map to convert a numeric column into a factor automatically
+# Usage: df %>% mutate(sex = apply_factor(sex, "sex"))
+apply_factor <- function(vec, map_name) {
+  map <- levels_map[[map_name]]
+  # levels are the names of the vector ("0", "1"), labels are the values ("Male", "Female")
+  factor(as.character(vec), levels = names(map), labels = map)
+}
+
+message(">>> Configuration and metadata (config.R) loaded.")

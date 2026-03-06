@@ -1,0 +1,591 @@
+---
+title: "01: Data Cleaning and Scoring"
+author: "Anel Zhunussova + Poornima Kumar"
+date: "10 December 2025" 
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    theme: united
+    number_sections: false
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Script overview
+
+**Purpose:**
+
+This script serves as the data preparation phase. It takes the RedCap export and transforms it into a clean, longitudinal dataset. Unlike previous versions, this script calculates scores for all available timepoints (baseline, two-weekly, monthly) regardless of when the participant answered the vaccine question. This creates a "master_database" with all observations that can be filtered later.
+
+**Requirements:**
+
+This script requires the two following files in the working directory:
+
+-   `COVERT_cumulative_data_Final_14Jan25.csv`: The raw export from RedCap. Details on the scoring method can be found in the Supplementary file.
+-   `zip_match.csv`: Zip code metadata for State Color identification.
+
+**Outline:**
+
+1.  **Setup and preparation:** loading packages and loading raw data.
+2.  **Static data processing:** cleaning variables collected only once at the baseline (Demographics, Zip Codes, Physio/Neuro scores).
+3.  **Longitudinal scoring:** calculating complex scores (Fear of Infection, Family Diagnosis) for every timepoint.
+4.  **Final assembly:** combining all data, changing "prefer not to say" to NA, filtering age and saving master database as `.csv` file.
+
+**Output:** `master_database_12Dec2025_AZ.csv`.
+
+---
+
+```{r, include=FALSE}
+# Changes log:
+# [16 December 2025 by AZ]
+# - created the script (redid old vaccine_data_preparation script)
+# [29 December 2025 by AZ]
+# - removed the part: pandemic stress of 6 to NA. I believe its an index 1-18, not 1-6, so 6 should be kept. Temporary created based on that new file for model data. 
+# [14 January 2025 by AZ]
+# - added calculation of the pandemic stress index into two variables: positive and negative (instead of just using sum).
+# - changed labeling of health_insurance (previously 1 was for uninsured, now 1 is for insured). 
+    # Before: # Logic: < 5 is Insured (0), >= 5 is Uninsured (1); 6,7 -> NA
+    # After: # Logic: < 5 is Insured (1), >= 5 is Uninsured (0); 6,7 -> NA
+# - corrected covid_diagnosed: previously we renamed covid_suspected to covid_diagnosis. Based on the scored dataset it should be separated into: covid_diagnosed and            covid_suspected.
+    # covid_diagnosed scored as: Yes (0), No (1), I am not sure (2) [I am not sure was collected biweekly -> temp will do option 2 as NA as in other cases]
+    # covid_suspected scored as: Yes <3 (0), No = 3 (1). It was 0, Yes, with a positive test | 1, Yes, medical diagnosis, but no test| 2, Yes,  have had some symptoms         but no diagnosis by doctor | 3, No symptoms or signs.
+# - changed covid_family diagnosis to: Yes, household = 0 and Yes, non-household = 1 -> (0), No = 2 -> (1). 
+# - removed difficulty of medical care and difficulty of obtaining food (because there are similar questions in pandemic stress index)
+# - added collapsing of small N subcategories:
+    # demographics education: collapsing  <HS, Some HS, and HS/GED into one category (0) and re-indexing the rest so the scale is continuous (0-4)
+    # stress of staying at home: collapsing "very"(3) and "extremely"(4) into one category (3) and keeping others as it is 0,1,2
+# - excluded sex "2" other response as for now by setting it to NA
+# - added following psychological scales 
+  # # adding additional 
+  # "^dsm_depression", "^dsm_anxiety", 
+  # # adding monthly only collected  scales (leaving panas as not many people)
+  # "^brs", "^bis", "^worry", "^pss", "^oci", "^mpss", # oci is removed due to high NA value
+  # 
+  # # only baseline 
+  # "^audit_month0", "^drug_abuse_month0", "^sias_month0" 
+
+# - temp removed oci because high NA (2145 obs/2177)
+
+# [19Jan 2026 by AZ]
+# - added better summary of final variables and saved as QCvariables_master_database_DATE_AZ.csv
+
+# [23Jan 2026 by AZ]
+# - changing pyshio and neuro scoring. Physio will be 0,1,2,3,4 and above; Neuro will be 0,1,2 and above
+# - combining covid_diagnosed_self and covid_suspected (due to low N in Yes of covid diagnosed self)
+# - removing dsm_depression, dsm_anxiety, drug_abuse, audit 
+
+# [10Feb 2026 by AZ]
+# - removed total scores in the final master database
+```
+# 1. Setup and preparation
+
+Loading project utilities and the cohort dataset.
+```{r setup, message=FALSE, warning=FALSE}
+# setwd("../scripts")
+
+source("../R/load_packages.R")
+source("../R/config.R")
+
+# Loading the main dataset and the zip code helper.
+loaded_data_raw <- read.csv("../data/raw/COVERT_cumulative_data_Final_14Jan25.csv") # 2177 obs. of 2936 variables
+zip_data    <- read.csv("../data/raw/zip_match.csv") # 2224 obs. of 3 variables
+```
+
+Renaming the timepoint suffix and prefixes for convenience 
+```{r}
+# Defining suffix mapping (old -> new)
+suffix_map <- list(
+  "_baseline"       = "_month0",
+  "_two_week"       = "_2week",
+  "_second_monthly" = "_month2",  
+  "_third_monthly"  = "_month3",  
+  "_monthly"        = "_month1", 
+  "_six_week"       = "_6week",
+  "_ten_week"       = "_10week"
+)
+
+# Renaming suffixes
+loaded_data <- loaded_data_raw
+for (old_suffix in names(suffix_map)) {
+  new_suffix <- suffix_map[[old_suffix]]
+  loaded_data <- loaded_data %>%
+    rename_with(
+      .fn = ~ sub(paste0(old_suffix, "$"), new_suffix, .), 
+      .cols = ends_with(old_suffix)
+    )
+}
+
+# Renaming prefixes
+# This handles the 'take_vaccination' and 'date_complete' variables
+loaded_data <- loaded_data %>%
+  rename_with(~ paste0(sub("^m_", "", .), "_month1"), starts_with("m_")) %>%
+  rename_with(~ paste0(sub("^sec_m_", "", .), "_month2"), starts_with("sec_m_")) %>%
+  rename_with(~ paste0(sub("^third_m_", "", .), "_month3"), starts_with("third_m_")) %>%
+  rename_with(~ paste0(sub("^t_", "", .), "_2week"), starts_with("t_")) %>%
+  rename_with(~ paste0(sub("^two_week_", "", .), "_2week"), starts_with("two_week")) %>%
+  rename_with(~ paste0(sub("^six_week_", "", .), "_6week"), starts_with("six_week")) %>%
+  rename_with(~ paste0(sub("^six_", "", .), "_6week"), starts_with("six_")) %>%
+  rename_with(~ paste0(sub("^ten_", "", .), "_10week"), starts_with("ten_"))  %>%
+
+  # This handles the ".x" and baseline inconsistencies
+  rename_with(~ gsub("baseline_date_complete.x", "date_complete_month0", .)) %>%
+  rename_with(~ gsub("date_complete.x", "date_complete", .))  %>% # Removes .x from all others
+  rename(take_vaccination_month0 = take_vaccination)
+
+```
+
+# 2. Static data processing
+This section processes variables that do not change over time and were collected at baseline.
+
+## 2.1 Demographics
+
+Extracting demographic information (e.g., age, education, sex)
+```{r}
+# Demographics data collected ones
+demographics <- loaded_data %>%
+  select(record_id, 
+         sex, 
+         age = age_month0,
+         education, 
+         area_type, 
+         psych_history, 
+         essential_worker_at_home, 
+         health_insurance) 
+```
+
+Collapsing low N categories for education: <HS, Some HS, and HS/GED into one category (0) and re-indexing the rest so the scale is continuous (0-4)
+```{r}
+demographics <- demographics %>%
+  mutate(education = case_when(
+    education <= 2 ~ 0, # 0, 1, and 2 into "HS or Less"
+    education == 3 ~ 1, # College (2yr)
+    education == 4 ~ 2, # College (4yr)
+    education == 5 ~ 3, # Post-College
+    education == 6 ~ 4, # > Graduate
+    TRUE ~ NA_real_     # Missing
+  ))
+
+# table(demographics$education)
+```
+
+## 2.2 State colors (Red vs Blue)
+
+Mapping zip codes to state political colors (1=Blue, 2=Red).
+```{r}
+# Defining state lists
+states1 <- c("Maine","Vermont","New Hampshire","Massachusetts","Connecticut","Rhode Island",
+             "Delaware",  "Washington, D.C.", "New York", "New Jersey", "Pennsylvania", "Maryland", 
+             "Virginia","Georgia","Michigan", "Illinois", "Wisconsin", "Minnesota", "Colorado", 
+             "New Mexico", "Arizona", "Nevada", "California", "Hawaii", "Oregon", "Washington")
+
+states2  <- c("Ohio","West Virginia","North Carolina", "South Carolina", "Florida", "Alabama",
+              "Mississippi","Louisiana","Indiana", "Kentucky", "Tennessee", "Arkansas","Missouri",
+              "Iowa","North Dakota", "South Dakota","Nebraska","Kansas","Oklahoma", "Texas", "Wyoming",
+              "Utah","Idaho","Montana", "Alaska")
+
+# Processing zip data
+processed_zip <- zip_data %>%
+  mutate(state = na_if(state, "#FIELD!")) %>%
+  mutate(state_color = case_when(
+    state %in% states1 ~ 1, # Blue
+    state %in% states2 ~ 2,  # Red
+    TRUE ~ NA_real_             # Other/Missing
+  )) %>%
+  select(record_id, state_color)
+```
+
+## 2.2 Physio and neuro scores
+
+Summing checklists for physical and neurological conditions.
+```{r}
+processed_physio_neuro <- loaded_data %>%
+  # Physio score: sum of allergies, asthma, diabetes, etc. (excluding epilepsy)
+  mutate(physio = rowSums(select(., has_seasonal_allergies:has_skin_problems) %>% 
+                                  select(-matches("epilepsy")), na.rm = TRUE)) %>%
+  
+  # Neuro score: sum of mental health, learning disorders, epilepsy
+  mutate(neurological = rowSums(select(., has_emotional_mental_health_problems:has_learning_disorder, 
+                                      has_epilepsy_seizures), na.rm = TRUE)) %>% 
+  # Apply caps: Physio max 4, Neuro max 2
+  mutate(
+    physio = pmin(physio, 4),
+    neurological = pmin(neurological, 2)
+  ) %>%
+  
+  select(record_id, physio, neurological)
+```
+
+
+# 3. Longitudinal scoring
+This section handles the "complex scores"—variables that need math (summing or recoding) before we can use them. We calculate scores for all timepoints simultaneously. 
+```{r}
+timepoints  <- c("month0","2week", "month1", "6week","month2","10week","month3") 
+```
+
+## 3.1 Time-stamps
+Considering that the data was collected in different time periods, time stamps for completion of each surveys are extracted for future analysis. 
+```{r}
+time_stamps <- loaded_data %>% 
+  select(record_id, matches("complete"), -matches("complete.y")) %>%
+  # converting date format to YYYY-MM-DD format
+  mutate(across(starts_with("date_"), ~ as_date(mdy_hm(., quiet = TRUE)))) 
+```
+
+## 3.2 Vaccination intent 
+
+Extracting the outcome variable
+-   The question that was asked:"Would you get vaccinated for COVID-19
+    if an approved vaccine was given to you today?"
+-   Possible responses: "0, Yes \| 1, No \| 2, Prefer not to answer"
+In later steps, prefer not to answer option will be removed. Additionally time-stamps for each period were collected 
+
+```{r}
+vaccination_data <- loaded_data %>% select(record_id, matches("take_vaccination")) 
+```
+
+## 3.3 Fear of infection
+
+The score is calculated based on the summation of "Fear of Self Infection" and "Fear of Family Infection".
+```{r}
+scored_fear_of_infection <- loaded_data %>% select(record_id)
+
+for (tp in timepoints) {
+  col_self   <- paste0("fear_self_infected_", tp)
+  col_family <- paste0("fear_family_infected_", tp)
+  
+  # Calculate
+  if (col_self %in% names(loaded_data) & col_family %in% names(loaded_data)) {
+    scored_fear_of_infection[[paste0("fear_of_infection_", tp)]] <- rowSums(
+    loaded_data[c(col_self, col_family)], 
+    na.rm = TRUE # still summing if one is NA
+)
+  }
+}
+
+```
+
+## 3.4 COVID diagnosis: family
+
+Re-coding to 0/1 scale
+
+Original: 
+0 = Yes Non-Household 
+1 = Yes Household 
+2 =  No Diagnosis 
+
+Re-coded:
+0 = Yes Non-Household and/or Yes Household 
+1 = No 
+```{r}
+# Helper function for recoding
+recode_fam <- function(h, nh, n) {
+
+case_when(
+  h == 1 | nh == 1 ~ 0, # Any diagnosis yes
+  n == 1  ~ 1, # None
+  TRUE ~ NA_real_  # Missing
+)
+}
+scored_family_diagnosis <- loaded_data %>% select(record_id)
+
+for (tp in timepoints) {
+  
+  # Construct the specific column names
+  col_h  <- paste0("covid_family_diag_household_", tp)
+  col_nh <- paste0("covid_family_diag_non_household_", tp)
+  col_n  <- paste0("covid_family_diag_none_", tp)
+  
+  # Calculate
+  if (col_h %in% names(loaded_data)) {
+    scored_family_diagnosis[[paste0("covid_diagnosed_family_", tp)]] <-  recode_fam(
+      loaded_data[[col_h]], 
+      loaded_data[[col_nh]], 
+      loaded_data[[col_n]]
+    )
+  }
+}
+```
+
+## 3.5 COVID suspected: self
+
+Combining covid_suspected and combining with covid_diagnosed
+
+Covid_suspected (self):
+  Original:
+  0 = Yes, with a positive test
+  1 = Yes, medical diagnosis, but no test
+  2 = Yes, have had some symptoms but no diagnosis by doctor
+  3 = No symptoms or signs
+
+  Re-coded:
+  0 = Yes (with a positive test/ medical diagnosis, but no test/ have had some symptoms but no diagnosis by doctor)
+  1 = No
+  
+Covid_diagnosed (self):
+  Original:
+  0 = Yes
+  1 = No
+  2 = I'm not sure
+  
+  Re-coded:
+  0 = Yes
+  1 = No
+  2 = NA
+  
+Final re-coded: 
+0 = Yes (Suspected or Diagnosed), 1 = No, NA = Not sure/Missing
+```{r}
+# Helper Function
+recode_covid <- function(suspected, diagnosed) {
+  # Suspected: 0,1,2 -> 0 (Yes); 3 -> 1 (No)
+  s_bin <- case_when(
+    suspected %in% c(0,1,2) ~ 0,
+    suspected == 3          ~ 1,
+    TRUE                    ~ NA_real_
+  )
+  
+  # Diagnosed: 0 -> 0 (Yes); 1 -> 1 (No); 2 -> NA
+  d_bin <- case_when(
+    diagnosed == 0 ~ 0,
+    diagnosed == 1 ~ 1,
+    TRUE           ~ NA_real_ # Handles 2 and NA
+  )
+  
+  # Combine: 0 (Yes) takes precedence over 1 (No)
+  pmin(s_bin, d_bin, na.rm = TRUE)
+}
+
+scored_covid_combined <- loaded_data %>% select(record_id)
+
+for (tp in timepoints) {
+  s_col <- paste0("covid_suspected_", tp)
+  d_col <- paste0("covid_diagnosed_", tp)
+  
+  if (s_col %in% names(loaded_data) & d_col %in% names(loaded_data)) {
+    scored_covid_combined[[paste0("covid_diagnosed_self_", tp)]] <- 
+      recode_covid(loaded_data[[s_col]], loaded_data[[d_col]])
+  }
+}
+```
+
+## 3.5 Pandemic stress index
+
+Checking all that applied
+```{r}
+# Classifying pandemic stress index response into positive and negative 
+psi_pos_items <- c(
+  "greater_good", "emo_support_others", "finan_support_others"
+)
+
+psi_neg_items <- c(
+  "covid_diag", "covid_fear_ofgetting", "covid_fear_ofgiving", "worry", "stigma", 
+  "finan_loss", "boredom", "lack_supplies", "anxiety", "depression", 
+  "sleep_changes", "substance", "sexual_changes", "loneliness", "confusion",
+  "other_diff"
+)
+
+
+# Helper function to sum items
+calculate_psi_sum <- function(data_row) {
+  if (all(is.na(data_row))) return(NA_real_) #  check if all items are NA so we don't return 0 for a missing survey.
+  sum(data_row, na.rm = TRUE)
+}
+
+scored_psi <- loaded_data %>% select(record_id)
+
+for (tp in timepoints) {
+  
+  cols_neg <- paste0("pandemic_stress_", psi_neg_items, "_", tp)
+  cols_pos <- paste0("pandemic_stress_", psi_pos_items, "_", tp)
+  
+  if (all(cols_neg %in% names(loaded_data))) {
+    
+    # Calculate negative score
+    scored_psi[[paste0("pandemic_stress_index_negative_", tp)]] <- apply(
+      loaded_data[, cols_neg], 1, calculate_psi_sum
+    )
+    
+    # Calculate positive score
+    scored_psi[[paste0("pandemic_stress_index_positive_", tp)]] <- apply(
+      loaded_data[, cols_pos], 1, calculate_psi_sum
+    )
+    
+  }
+}
+```
+
+## 3.7 Stress staying home 
+
+Collapse "Extremely" and "Very" into one due to small N within categories. 
+Logic: 0->0, 1->1, 2->2, 3&4->3
+```{r}
+# Helper function for collapsing
+recode_stay_home <- function(x) {
+  case_when(
+    x %in% c(3, 4) ~ 3, # Collapse 3 and 4 into 3 
+    x %in% 0:2 ~ x,     # Keep 0, 1, and 2 as they are
+    TRUE  ~ NA_real_    # Missing 
+  )
+}
+scored_stress_stay_home <- loaded_data %>% select(record_id)
+
+for (tp in timepoints) {
+  old_col <- paste0("covid_stress_restrict_out_", tp)
+  new_col <- paste0("stress_stay_home_", tp)
+  
+  if (old_col %in% names(loaded_data)) {
+    scored_stress_stay_home[[new_col]] <- recode_stay_home(loaded_data[[old_col]])
+  }
+}
+
+# 4. Check the results for month0 to verify counts
+table(scored_stress_stay_home$stress_stay_home_month0, useNA = "always")
+
+```
+
+
+## 3.6 Other scales 
+
+```{r}
+vars_to_extract <- c(
+  "promis_depression", "promis_anxiety", "promis_fatigue", "promis_sleep", "promis_participation",
+  
+  "^loneliness",
+  "^shps", 
+  "ami_total", "ami_behavioral", "ami_emotional", "ami_social",
+  
+  "coping_total", "coping_accept", "coping_active", "coping_beh_diseng", "coping_denial",
+  "coping_emo_support", "coping_humor", "coping_inst_support", "coping_plan", "coping_pos_fram",
+  "coping_religion", "coping_self_blame", "coping_self_dist", "coping_substance", "coping_venting",
+  
+  "covid_mental_health", "covid_physical_health", "covid_read_news", "covid_time_spent_outside",
+  "covid_difficulty_restriction", 
+  
+  # adding additional 
+  #"^dsm_depression", "^dsm_anxiety", 
+  # adding monthly only collected  scales (leaving panas as not many people)
+  "^brs", "^bis", "^worry", "^pss",  "^mpss", # temp removed "^oci"
+  
+  # only baseline 
+ # "^audit_month0", "^drug_abuse_month0", 
+  "^sias_month0" 
+)
+
+# Adding bis, rumination, social anxiety 
+
+# Extracting listed variables
+raw_scales_data <- loaded_data %>% select(record_id, matches(paste(vars_to_extract, collapse="|")))
+
+# Renaming certain variables for convenience  (will need to double CHECK with PK feel like some are confusing to rename)
+rename_patterns <- c(
+  "sias_month0"                  = "sias",
+  "ami_"                         = "apathy_",          
+  "shps"                         = "anhedonia",
+  "covid_mental_health"          = "mental_health",
+  "covid_physical_health"        = "physical_health",
+  "covid_read_news"              = "reading_about",
+  "covid_time_spent_outside"     = "time_outside_home",
+  "covid_difficulty_restriction" = "trouble_staying_away")
+
+
+other_scales_data <- raw_scales_data %>% rename_with(~ str_replace_all(., rename_patterns))
+```
+
+
+# 4. Final assembly 
+
+## 4.1 Combining all data 
+Merging all extracted data from sections 2 and 3.
+```{r}
+combined_data <- 
+  # Adding static data
+  demographics %>%
+  left_join(processed_zip, by = "record_id") %>%
+  left_join(processed_physio_neuro, by = "record_id") %>%
+  
+  # Adding longitudinal data
+  left_join(time_stamps, by = "record_id") %>%
+  left_join(vaccination_data, by = "record_id") %>%
+  left_join(scored_fear_of_infection, by = "record_id") %>%
+  left_join(scored_family_diagnosis, by = "record_id") %>%
+  left_join(scored_covid_combined, by = "record_id") %>%
+  left_join(scored_psi, by = "record_id") %>%
+  left_join(scored_stress_stay_home, by = "record_id") %>%
+  left_join(other_scales_data, by = "record_id")
+```
+
+## 4.2 Cleaning up
+Changing "prefer not to say" to NA, filtering age and removing "total" scores of psychological scales 
+- drop_na is not included at this step
+```{r}
+master_database <- combined_data %>% 
+  # Removing total scores of pscyhological scales 
+  dplyr::select(-matches('total')) %>% 
+  # Changing "Prefer not to say" options to NA
+  mutate(psych_history = na_if(psych_history, 2)) %>%
+  mutate(sex = na_if(sex, 2)) %>% # removing followingly "other" gender option
+
+  mutate(across(starts_with("take_vaccination"),~ na_if(., 2))) %>%
+
+  # Logic: < 5 is Insured (1), >= 5 is Uninsured (0); 6,7 -> NA 
+  mutate(health_insurance = na_if(health_insurance, 6)) %>%
+  mutate(health_insurance = na_if(health_insurance, 7)) %>%
+  mutate(health_insurance = ifelse(health_insurance < 5, 1, 0)) %>% # order is important 
+  
+  # Age filter: keeping only age range of 10-100
+  filter(age >= 10 & age <= 100) 
+
+head(master_database)
+```
+
+QC final variables 
+```{r}
+pattern <- paste0("(", paste0('_', timepoints, collapse = "|"), ")$")
+
+variable_summary <- tibble(
+  full_name = colnames(master_database),
+  type = sapply(master_database, function(x) class(x)[1])  # can change to loaded_data to check for all
+) %>%
+  mutate(
+    base_name = str_remove(full_name, pattern),
+    found_suffix = str_extract(full_name, pattern)
+  ) %>%
+  group_by(base_name) %>%
+  summarise(
+    data_type = first(type),
+    num_timepoints = n(),
+    list_of_timepoints = paste(sort(na.omit(found_suffix)), collapse = ", "),
+    
+    range = {
+      all_vals <- unlist(master_database[, full_name])
+      clean_vals <- all_vals[!is.na(all_vals)]
+      
+      if (length(clean_vals) == 0) {
+        "All NA"
+      } else if (first(type) == "Date") {
+        # Convert the unlisted integers back to Dates
+        date_vals <- as.Date(clean_vals, origin = "1970-01-01")
+        paste0(min(date_vals), " to ", max(date_vals))
+      } else if (first(type) %in% c("numeric", "integer")) {
+        paste0(min(clean_vals), " - ", max(clean_vals))
+      } else {
+        paste0(length(unique(clean_vals)), " unique labels")
+      }
+    }
+  ) %>%
+  mutate(list_of_timepoints = if_else(list_of_timepoints %in% c("", "_month0"), "Single observation", list_of_timepoints)) %>%
+  arrange(list_of_timepoints)
+
+print(variable_summary, n = Inf)
+```
+
+  
+  
+Saving the master database  
+```{r}
+write.csv(variable_summary, "../data/processed/QC_variables_of_master_database.csv", row.names = FALSE) # 60 unique vars + record_id
+write.csv(master_database, "../data/processed/master_database.csv", row.names = FALSE) # 2177 obs 319 var
+```
+
